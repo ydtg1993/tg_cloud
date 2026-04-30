@@ -8,6 +8,7 @@ from ui.file_table_model import FileTableModel
 from ui.upload_task import UploadTask
 from ui.settings_dialog import SettingsDialog
 from ui.directory_tree import DirectoryTreeModel, DirTreeView
+from ui.upload_dialog import UploadQueueDialog
 
 # 下载任务（不变）
 class DownloadTask(QRunnable):
@@ -33,18 +34,43 @@ class DownloadTask(QRunnable):
                     url = file.file_path
                     async with aiohttp.ClientSession() as session:
                         async with session.get(url) as resp:
-                            with open(self.save_path, 'wb') as f_out:
+                            with open(self.save_path, 'wb') as f:
                                 while True:
                                     chunk = await resp.content.read(8192)
-                                    if not chunk:
-                                        break
-                                    f_out.write(chunk)
+                                    if not chunk: break
+                                    f.write(chunk)
             loop.run_until_complete(_download())
             self.signals.finished.emit(self.save_path)
         except Exception as e:
             self.signals.error.emit(str(e))
 
-# ---------- 自定义图标视图 ----------
+# Telegram 消息删除任务（新增）
+class DeleteMessageTask(QRunnable):
+    class Signals(QObject):
+        finished = Signal()
+        error = Signal(str)
+    def __init__(self, token, chat_id, message_id):
+        super().__init__()
+        self.token = token
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.signals = self.Signals()
+    def run(self):
+        try:
+            from telegram import Bot
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            async def _delete():
+                bot = Bot(token=self.token)
+                async with bot:
+                    await bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
+            loop.run_until_complete(_delete())
+            self.signals.finished.emit()
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+# 自定义图标视图（支持拖拽携带ID）
 class FileIconView(QListWidget):
     def startDrag(self, supportedActions):
         item = self.currentItem()
@@ -65,11 +91,9 @@ class MainWindow(QMainWindow):
         self.config = ConfigManager()
         self.db = DBManager()
         self.threadpool = QThreadPool()
-        self.temp_id_counter = 0
-        self.temp_files = {}
+        self.upload_counter = 0          # 修复：初始化 upload_counter
         self.current_dir_id = 0
         self.dir_stack = [0]
-
         self.icon_provider = QFileIconProvider()
 
         self.setWindowTitle("Telegram 文件管家 Pro")
@@ -132,7 +156,6 @@ class MainWindow(QMainWindow):
         self.file_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_table.customContextMenuRequested.connect(self.table_context_menu)
         self.file_table.doubleClicked.connect(self.on_item_double_clicked)
-        # 启用列表拖拽（同样支持移动到目录树）
         self.file_table.setDragEnabled(True)
         self.file_table.setDragDropMode(QAbstractItemView.DragOnly)
         self.file_table.setColumnWidth(0, 300)
@@ -140,18 +163,16 @@ class MainWindow(QMainWindow):
         self.file_table.setColumnWidth(2, 150)
         self.view_stack.addWidget(self.file_table)
 
-        # 自定义图标视图
+        # 图标视图
         self.icon_view = FileIconView()
         self.icon_view.setViewMode(QListView.IconMode)
         self.icon_view.setIconSize(QSize(48, 48))
         self.icon_view.setGridSize(QSize(120, 100))
         self.icon_view.setResizeMode(QListView.Adjust)
-        self.icon_view.setMovement(QListView.Static)
         self.icon_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.icon_view.customContextMenuRequested.connect(self.icon_context_menu)
         self.icon_view.doubleClicked.connect(self.icon_double_clicked)
         self.icon_view.setDragEnabled(True)
-        self.icon_view.setAcceptDrops(False)   # 不接受外部放入
         self.view_stack.addWidget(self.icon_view)
 
         self.view_stack.setCurrentIndex(0)
@@ -169,15 +190,10 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(right_layout, 3)
 
-    # ===== 视图切换 =====
-    def switch_view(self, index):
-        self.view_stack.setCurrentIndex(index)
-        self._load_current_directory()
-
+    # ===== 目录加载 =====
     def _load_current_directory(self):
         items = self.db.get_items_in_directory(self.current_dir_id)
         self.file_model.load_items(items)
-
         self.icon_view.clear()
         style = QApplication.style()
         for item in items:
@@ -188,18 +204,16 @@ class MainWindow(QMainWindow):
             else:
                 icon = self._get_system_icon(name)
             list_item = QListWidgetItem(icon, name)
-            # 附加提示
             size_str = ""
             if not is_dir and item[6]:
                 try:
-                    size = float(item[6])
-                    for unit in ['B','KB','MB','GB']:
-                        if size < 1024:
-                            size_str = f"{size:.1f} {unit}"
+                    s = float(item[6])
+                    for u in ['B','KB','MB','GB']:
+                        if s < 1024:
+                            size_str = f"{s:.1f} {u}"
                             break
-                        size /= 1024
-                except:
-                    pass
+                        s /= 1024
+                except: pass
             type_str = "文件夹" if is_dir else (item[8] or "")
             list_item.setToolTip(f"名称: {name}\n大小: {size_str}\n类型: {type_str}")
             list_item.setData(Qt.UserRole, (item[0], is_dir))
@@ -225,8 +239,7 @@ class MainWindow(QMainWindow):
             self.up_btn.setEnabled(True)
 
     def go_up(self):
-        if self.current_dir_id == 0:
-            return
+        if self.current_dir_id == 0: return
         if len(self.dir_stack) > 1:
             self.dir_stack.pop()
             self.current_dir_id = self.dir_stack[-1]
@@ -257,18 +270,15 @@ class MainWindow(QMainWindow):
                 self.current_dir_id = data[0]
                 self._load_current_directory()
 
-        # ===== 上传逻辑（弹窗队列） =====
-
+    # ===== 批量上传（对话框） =====
     def start_bulk_upload(self, file_paths):
-        if not self._check_current_bot():
-            return
-        if not file_paths:
-            return
-        # 生成 upload_id 列表
-        upload_list = []
+        if not self._check_current_bot(): return
+        if not file_paths: return
         bot = self.config.get_current_bot()
         token = bot["token"]
         chat_id = bot["chat_id"]
+
+        upload_list = []
         for fp in file_paths:
             uid = f"upload_{self.upload_counter}"
             self.upload_counter += 1
@@ -278,15 +288,13 @@ class MainWindow(QMainWindow):
         # 创建任务并连接信号
         for fp, uid in upload_list:
             task = UploadTask(token, chat_id, fp, self.config.config, uid)
-            # 连接进度和完成/错误到对话框
-            task.signals.progress.connect(dialog.task_started)  # progress信号改为开始
+            task.signals.progress.connect(dialog.task_started)
             task.signals.finished.connect(self.on_bulk_upload_finished)
             task.signals.error.connect(self.on_bulk_upload_error)
-            # 连接错误到对话框
-            task.signals.error.connect(dialog.task_error)
             task.signals.finished.connect(dialog.task_finished)
+            task.signals.error.connect(dialog.task_error)
             self.threadpool.start(task)
-            dialog.task_started(uid)  # 手动触发开始状态
+            dialog.task_started(uid)   # 触发开始状态
 
         dialog.exec()
 
@@ -296,58 +304,69 @@ class MainWindow(QMainWindow):
         self.db.add_file(file_id, msg_id, bot["chat_id"], original_name, original_name,
                          self.current_dir_id, file_size, ext)
         self._load_current_directory()
+        self.show_status_message(f"上传成功: {original_name}")
 
     def on_bulk_upload_error(self, upload_id, error_msg):
-        # 对话框已显示错误，这里仅做记录，可补充全局提示
-        pass
+        self.show_status_message(f"上传失败: {error_msg}", error=True)
 
-    # 右键菜单中的“上传文件”或“上传文件夹”
-    def upload_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "选择文件")
-        if paths:
-            self.start_bulk_upload(paths)
-
-    # ===== 列表右键菜单 =====
+    # ===== 右键菜单 =====
     def table_context_menu(self, pos):
         menu = QMenu()
         menu.addAction("📤 上传文件", self.upload_files)
+        menu.addAction("📁 上传文件夹", self.upload_folder)
         menu.addAction("📁 新建目录", self.create_directory)
         idx = self.file_table.indexAt(pos)
         if idx.isValid():
             item = self.file_model.get_item(idx.row())
-            if item and item[2] == 0:  # 文件
+            if item and item[2] == 0:
                 menu.addSeparator()
                 menu.addAction("⬇️ 下载", lambda: self.download_file(idx))
                 menu.addAction("✏️ 重命名", lambda: self.rename_file_from_table(idx))
                 menu.addAction("🗑 删除", lambda: self.delete_files([idx]))
                 menu.addAction("📋 属性", lambda: self.show_file_properties(idx))
-            elif item and item[2] == 1:  # 目录
+            elif item and item[2] == 1:
                 menu.addSeparator()
                 menu.addAction("✏️ 重命名", lambda: self.rename_directory_from_table(idx))
                 menu.addAction("🗑 删除目录", lambda: self.delete_directory(idx))
         menu.exec(self.file_table.viewport().mapToGlobal(pos))
 
-    # ===== 图标右键菜单 =====
     def icon_context_menu(self, pos):
         menu = QMenu()
         menu.addAction("📤 上传文件", self.upload_files)
+        menu.addAction("📁 上传文件夹", self.upload_folder)
         menu.addAction("📁 新建目录", self.create_directory)
         item = self.icon_view.itemAt(pos)
         if item:
             data = item.data(Qt.UserRole)
-            if data and data[1] == 0:  # 文件
+            if data and data[1] == 0:
                 menu.addSeparator()
                 menu.addAction("⬇️ 下载", lambda: self.download_icon_file(item))
                 menu.addAction("✏️ 重命名", lambda: self.rename_file_from_icon(item))
                 menu.addAction("🗑 删除", lambda: self.delete_icon_files([item]))
                 menu.addAction("📋 属性", lambda: self.show_icon_properties(item))
-            elif data and data[1] == 1:  # 目录
+            elif data and data[1] == 1:
                 menu.addSeparator()
                 menu.addAction("✏️ 重命名", lambda: self.rename_directory_from_icon(item))
                 menu.addAction("🗑 删除目录", lambda: self.delete_icon_directory(item))
         menu.exec(self.icon_view.viewport().mapToGlobal(pos))
 
-    # ===== 重命名功能 =====
+    # ===== 上传文件/文件夹 =====
+    def upload_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择文件")
+        if paths:
+            self.start_bulk_upload(paths)
+
+    def upload_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
+        if folder:
+            all_files = []
+            for root, dirs, files in os.walk(folder):
+                for f in files:
+                    all_files.append(os.path.join(root, f))
+            if all_files:
+                self.start_bulk_upload(all_files)
+
+    # ===== 文件/目录重命名 =====
     def rename_file_from_table(self, index):
         item = self.file_model.get_item(index.row())
         if item and item[2] == 0:
@@ -381,50 +400,58 @@ class MainWindow(QMainWindow):
             self.dir_model.refresh()
             self._load_current_directory()
 
-    # ===== 上传 =====
-    def upload_files(self, checked=False):
-        if not self._check_current_bot():
+    # ===== 删除文件（同步 Telegram） =====
+    def _delete_file_with_telegram(self, local_id):
+        """删除本地数据库记录，并尝试删除 Telegram 上的消息"""
+        file_info = self.db.get_file_by_id(local_id)
+        if not file_info:
             return
-        files, _ = QFileDialog.getOpenFileNames(self, "选择文件")
-        for f in files:
-            self._schedule_upload(f, is_temp=False)
+        message_id = file_info[2]  # message_id 字段
+        self.db.delete_file(local_id)   # 先删除本地，确保即使远程失败也清理本地
 
-    def _schedule_upload(self, file_path, is_temp=False):
-        bot = self.config.get_current_bot()
-        token = bot["token"]
-        chat_id = bot["chat_id"]
-        local_id = f"temp_{self.temp_id_counter}"
-        self.temp_id_counter += 1
-        task = UploadTask(token, chat_id, file_path, self.config.config, local_id, is_temp)
-        task.signals.finished.connect(self.on_upload_finished)
-        task.signals.error.connect(self.on_upload_error)
-        if is_temp:
-            self.temp_files[local_id] = file_path
-        self.threadpool.start(task)
-        self.show_status_message("上传中...", progress=True)
+        # 如果有有效的 message_id，则远程删除
+        if message_id is not None:
+            bot = self.config.get_current_bot()
+            if bot:
+                task = DeleteMessageTask(bot["token"], bot["chat_id"], message_id)
+                task.signals.error.connect(lambda e: self.show_status_message(f"远程删除失败: {e}", error=True))
+                self.threadpool.start(task)
 
-    def on_upload_finished(self, local_id, file_id, msg_id, original_name, file_size):
-        bot = self.config.get_current_bot()
-        ext = os.path.splitext(original_name)[1].lower()
-        self.db.add_file(file_id, msg_id, bot["chat_id"], original_name, original_name,
-                         self.current_dir_id, file_size, ext)
-        self._load_current_directory()
-        self.show_status_message(f"上传成功: {original_name}")
-        if local_id in self.temp_files:
-            try:
-                os.remove(self.temp_files[local_id])
-            except:
-                pass
-            del self.temp_files[local_id]
+    def delete_files(self, indexes):
+        res = QMessageBox.question(self, "确认删除", "确定要删除选中的文件吗？\n（将同步删除 Telegram 中的对应消息）")
+        if res == QMessageBox.Yes:
+            for idx in indexes:
+                item = self.file_model.get_item(idx.row())
+                if item and item[2] == 0:
+                    self._delete_file_with_telegram(item[0])
+            self._load_current_directory()
 
-    def on_upload_error(self, local_id, error_msg):
-        self.show_status_message(f"上传失败: {error_msg}", error=True)
-        if local_id in self.temp_files:
-            try:
-                os.remove(self.temp_files[local_id])
-            except:
-                pass
-            del self.temp_files[local_id]
+    def delete_icon_files(self, items):
+        res = QMessageBox.question(self, "确认删除", "确定要删除选中的文件吗？\n（将同步删除 Telegram 中的对应消息）")
+        if res == QMessageBox.Yes:
+            for item in items:
+                data = item.data(Qt.UserRole)
+                if data and data[1] == 0:
+                    self._delete_file_with_telegram(data[0])
+            self._load_current_directory()
+
+    # ===== 目录删除 =====
+    def delete_directory(self, index):
+        item = self.file_model.get_item(index.row())
+        if item and item[2] == 1:
+            self._delete_dir(item[0], item[1])
+
+    def delete_icon_directory(self, item):
+        data = item.data(Qt.UserRole)
+        if data and data[1] == 1:
+            self._delete_dir(data[0], item.text())
+
+    def _delete_dir(self, dir_id, name):
+        confirm = QMessageBox.question(self, "确认删除", f"删除目录 “{name}” 及其内部文件将移至根目录，确认？")
+        if confirm == QMessageBox.Yes:
+            self.db.delete_directory(dir_id)
+            self.dir_model.refresh()
+            self._load_current_directory()
 
     # ===== 下载 =====
     def download_file(self, index):
@@ -443,16 +470,12 @@ class MainWindow(QMainWindow):
         self._start_download_from_info(file_info)
 
     def _start_download_from_info(self, file_info):
-        if not file_info:
-            return
+        if not file_info: return
         file_id = file_info[1]
         default_name = file_info[4] if file_info[4] else "file"
-        save_path, _ = QFileDialog.getSaveFileName(
-            self, "保存文件",
-            os.path.join(self.config.config.get("download_path", ""), default_name)
-        )
-        if not save_path:
-            return
+        save_path, _ = QFileDialog.getSaveFileName(self, "保存文件",
+                                                   os.path.join(self.config.config.get("download_path", ""), default_name))
+        if not save_path: return
         bot = self.config.get_current_bot()
         task = DownloadTask(bot["token"], file_id, save_path)
         task.signals.finished.connect(lambda p: self.show_status_message(f"下载完成: {p}"))
@@ -460,48 +483,12 @@ class MainWindow(QMainWindow):
         self.show_status_message("下载中...", progress=True)
         self.threadpool.start(task)
 
-    # ===== 目录操作 =====
+    # ===== 新建目录 =====
     def create_directory(self):
         name, ok = QInputDialog.getText(self, "新建目录", "目录名:")
         if ok and name:
             self.db.add_directory(name, self.current_dir_id)
             self.dir_model.refresh()
-            self._load_current_directory()
-
-    def delete_directory(self, index):
-        item = self.file_model.get_item(index.row())
-        if item and item[2] == 1:
-            self._delete_dir(item[0], item[1])
-
-    def delete_icon_directory(self, item):
-        data = item.data(Qt.UserRole)
-        if data and data[1] == 1:
-            self._delete_dir(data[0], item.text())
-
-    def _delete_dir(self, dir_id, name):
-        res = QMessageBox.question(self, "确认删除", f"删除目录 “{name}” 及其内部文件将移至根目录，确认？")
-        if res == QMessageBox.Yes:
-            self.db.delete_directory(dir_id)
-            self.dir_model.refresh()
-            self._load_current_directory()
-
-    # ===== 文件删除 =====
-    def delete_files(self, indexes):
-        res = QMessageBox.question(self, "确认删除", "确定要删除选中的文件吗？")
-        if res == QMessageBox.Yes:
-            for idx in indexes:
-                item = self.file_model.get_item(idx.row())
-                if item and item[2] == 0:
-                    self.db.delete_file(item[0])
-            self._load_current_directory()
-
-    def delete_icon_files(self, items):
-        res = QMessageBox.question(self, "确认删除", "确定要删除选中的文件吗？")
-        if res == QMessageBox.Yes:
-            for item in items:
-                data = item.data(Qt.UserRole)
-                if data and data[1] == 0:
-                    self.db.delete_file(data[0])
             self._load_current_directory()
 
     # ===== 属性 =====
@@ -522,8 +509,7 @@ class MainWindow(QMainWindow):
         self._show_properties_from_db(file_info)
 
     def _show_properties_from_db(self, file_info):
-        if not file_info:
-            return
+        if not file_info: return
         msg = f"""文件名称: {file_info[4] or file_info[5]}
 大小: {self._format_size(file_info[7])}
 类型: {file_info[8] or '未知'}
@@ -531,24 +517,19 @@ class MainWindow(QMainWindow):
 Telegram File ID: {file_info[1]}
 Message ID: {file_info[2]}
 Chat ID: {file_info[3]}
-本地数据库 ID: {file_info[0]}
-"""
+本地数据库 ID: {file_info[0]}"""
         QMessageBox.information(self, "文件属性", msg)
 
     def _format_size(self, size):
-        if size is None:
-            return "未知"
-        try:
-            size = float(size)
-        except:
-            return str(size)
+        if size is None: return "未知"
+        try: size = float(size)
+        except: return str(size)
         for unit in ['B','KB','MB','GB']:
-            if size < 1024:
-                return f"{size:.1f} {unit}"
+            if size < 1024: return f"{size:.1f} {unit}"
             size /= 1024
         return f"{size:.1f} TB"
 
-    # ===== 文件移动（从拖拽） =====
+    # ===== 文件移动 =====
     def on_file_moved_to_dir(self, file_local_id, target_dir_id):
         self.db.move_file(file_local_id, target_dir_id)
         self._load_current_directory()
@@ -566,13 +547,11 @@ Chat ID: {file_info[3]}
 
     def _rename_dir_from_tree(self, idx):
         dir_id = idx.data(Qt.UserRole)
-        old_name = idx.data()
-        self._rename_dir(dir_id, old_name)
+        self._rename_dir(dir_id, idx.data())
 
     def _delete_dir_from_tree(self, idx):
         dir_id = idx.data(Qt.UserRole)
-        name = idx.data()
-        self._delete_dir(dir_id, name)
+        self._delete_dir(dir_id, idx.data())
 
     # ===== 拖拽外部文件 =====
     def dragEnterEvent(self, event):
@@ -589,15 +568,15 @@ Chat ID: {file_info[3]}
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if os.path.isdir(path):
-                for root, dirs, filenames in os.walk(path):
-                    for f in filenames:
+                for root, dirs, files in os.walk(path):
+                    for f in files:
                         paths.append(os.path.join(root, f))
             elif os.path.isfile(path):
                 paths.append(path)
         if paths:
             self.start_bulk_upload(paths)
 
-    # ===== 状态 =====
+    # ===== 状态 & 设置 =====
     def show_status_message(self, msg, error=False, progress=False):
         self.status_text.setText(msg)
         self.progress_bar.setVisible(progress)
@@ -605,6 +584,8 @@ Chat ID: {file_info[3]}
             self.status_text.setStyleSheet("color: red;")
         else:
             self.status_text.setStyleSheet("color: #ccc;")
+        if not progress:
+            self.progress_bar.setVisible(False)
 
     def open_settings(self):
         dlg = SettingsDialog(self.config, self)
