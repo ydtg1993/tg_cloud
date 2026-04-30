@@ -7,6 +7,19 @@ class DBManager:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.create_tables()
 
+    def get_items_in_directory(self, directory_id=0):
+        dirs = self.conn.execute(
+            "SELECT id, name, 1 AS is_dir, NULL AS message_id, NULL AS original_name, NULL AS display_name, NULL AS file_size, NULL AS upload_time, NULL AS mime_type "
+            "FROM directories WHERE parent_id=? ORDER BY name",
+            (directory_id,)
+        ).fetchall()
+        files = self.conn.execute(
+            "SELECT id, NULL AS name, 0 AS is_dir, message_id, original_name, display_name, file_size, upload_time, mime_type "
+            "FROM files WHERE directory_id=? ORDER BY display_name, original_name",
+            (directory_id,)
+        ).fetchall()
+        return dirs + files
+
     def create_tables(self):
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS directories (

@@ -46,7 +46,7 @@ class SettingsDialog(QDialog):
         self.config_manager = config_manager
         self.config = config_manager.config
         self.setWindowTitle("应用设置")
-        self.resize(650, 450)
+        self.resize(650, 400)
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -100,9 +100,6 @@ class SettingsDialog(QDialog):
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["dark", "light"])
         general_layout.addRow("主题:", self.theme_combo)
-        self.clipboard_check = QComboBox()
-        self.clipboard_check.addItems(["开启", "关闭"])
-        general_layout.addRow("剪贴板监听:", self.clipboard_check)
         self.tabs.addTab(self.general_tab, "常规")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -119,8 +116,8 @@ class SettingsDialog(QDialog):
             item_text = f"{bot['name']} ({key})"
             self.bot_list.addItem(item_text)
             if key == self.config.get("current_bot"):
-                # 高亮但不用 currentItem，直接设置最后添加的项
-                self.bot_list.item(self.bot_list.count()-1).setText(item_text + " ★")
+                if self.bot_list.count() > 0:
+                    self.bot_list.item(self.bot_list.count()-1).setText(item_text + " ★")
 
         pyro = self.config.get("pyrogram", {})
         self.api_id_edit.setText(str(pyro.get("api_id", "")))
@@ -135,7 +132,6 @@ class SettingsDialog(QDialog):
 
         self.download_path_edit.setText(self.config.get("download_path", ""))
         self.theme_combo.setCurrentText(self.config.get("theme", "dark"))
-        self.clipboard_check.setCurrentText("开启" if self.config.get("clipboard_enabled", True) else "关闭")
 
     def _connect_signals(self):
         self.add_btn.clicked.connect(self._add_bot)
@@ -229,12 +225,10 @@ class SettingsDialog(QDialog):
             client, phone_code_hash = loop.run_until_complete(
                 login_pyrogram(api_id_int, api_hash, phone)
             )
-            # 主线程弹出验证码输入框（安全）
             code, ok = QInputDialog.getText(self, "验证码", "请输入 Telegram 验证码:")
             if not ok or not code:
                 loop.run_until_complete(client.disconnect())
                 raise Exception("取消登录")
-
             session = loop.run_until_complete(
                 finish_login(client, phone, phone_code_hash, code)
             )
@@ -261,6 +255,5 @@ class SettingsDialog(QDialog):
     def save_and_close(self):
         self.config["download_path"] = self.download_path_edit.text()
         self.config["theme"] = self.theme_combo.currentText()
-        self.config["clipboard_enabled"] = self.clipboard_check.currentText() == "开启"
         self.config_manager.save()
         self.accept()
