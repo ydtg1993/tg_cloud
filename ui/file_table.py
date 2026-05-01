@@ -1,41 +1,79 @@
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
+import json
 
 class FileTableView(QTableView):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.verticalHeader().setVisible(False)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.move_file_callback = None   # 主窗口设置
+        self.move_file_callback = None
         self._highlight_row = -1
+        self._drag_start_pos = None
 
-    def startDrag(self, supportedActions):
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton and self._drag_start_pos is not None:
+            # 检查是否达到拖拽阈值（避免轻微抖动导致误拖拽）
+            if (event.pos() - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                index = self.indexAt(self._drag_start_pos)
+                if index.isValid():
+                    model = self.model()
+                    if hasattr(model, 'get_item'):
+                        item = model.get_item(index.row())
+                        if item and item[2] == 0:  # 是文件
+                            # 启动拖拽（内部会收集所有选中的文件）
+                            self._start_multidrag()
+                            self._drag_start_pos = None
+                            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _start_multidrag(self):
+        """收集所有选中的文件 ID 并启动拖拽"""
         indexes = self.selectionModel().selectedRows()
-        if not indexes:
+        file_ids = []
+        model = self.model()
+        if not hasattr(model, 'get_item'):
             return
-        idx = indexes[0]
-        file_model = self.model()
-        if not hasattr(file_model, 'get_item'):
-            super().startDrag(supportedActions)
+        # 收集所有选中的文件 ID（忽略目录）
+        for idx in indexes:
+            item = model.get_item(idx.row())
+            if item and item[2] == 0:
+                file_ids.append(item[0])
+        if not file_ids:
             return
-        item = file_model.get_item(idx.row())
-        if not item or item[2] != 0:  # 不是文件
-            return
-        file_id = item[0]
+
+        # 序列化为 JSON
+        import json
         mime = QMimeData()
-        mime.setData("application/x-file-id", str(file_id).encode())
+        mime.setData("application/x-file-id", json.dumps(file_ids).encode())
+
         drag = QDrag(self)
         drag.setMimeData(mime)
-        # 设置拖拽图标
-        icon = idx.data(Qt.DecorationRole)
+
+        # 图标使用第一个文件的图标
+        first_idx = indexes[0]
+        icon = first_idx.data(Qt.DecorationRole)
         if icon and hasattr(icon, 'pixmap'):
             drag.setPixmap(icon.pixmap(48, 48))
         else:
-            # 默认图标
             drag.setPixmap(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon).pixmap(48, 48))
         drag.exec(Qt.MoveAction)
+
+    def startDrag(self, supportedActions):
+        self._start_multidrag()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat("application/x-file-id"):
@@ -65,13 +103,20 @@ class FileTableView(QTableView):
             if not hasattr(file_model, 'get_item'):
                 return
             item = file_model.get_item(target_index.row())
-            if not item or item[2] != 1:  # 不是目录
+            if not item or item[2] != 1:
                 return
             target_dir_id = item[0]
-            raw = bytes(event.mimeData().data("application/x-file-id"))
-            file_local_id = int(raw.decode())
+            raw_data = bytes(event.mimeData().data("application/x-file-id"))
+            try:
+                file_ids = json.loads(raw_data.decode())
+                if isinstance(file_ids, int):
+                    file_ids = [file_ids]
+            except:
+                file_ids = [int(raw_data.decode())]
+
             if self.move_file_callback:
-                self.move_file_callback(file_local_id, target_dir_id)
+                for fid in file_ids:
+                    self.move_file_callback(fid, target_dir_id)
             event.acceptProposedAction()
         else:
             super().dropEvent(event)

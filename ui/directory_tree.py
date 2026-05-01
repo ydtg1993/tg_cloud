@@ -2,6 +2,7 @@ from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QTreeView
 from PySide6.QtGui import QColor
 from PySide6.QtCore import QPersistentModelIndex
+import json
 
 class DirTreeView(QTreeView):
     def __init__(self, db, parent=None):
@@ -32,18 +33,23 @@ class DirTreeView(QTreeView):
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
-        # 先清除高亮
         self._clear_highlight()
         if event.mimeData().hasFormat("application/x-file-id"):
             index = self.indexAt(event.pos())
             if not index.isValid():
                 return
             dir_id = index.data(Qt.UserRole)
-            # 解析 file_id
             raw_data = bytes(event.mimeData().data("application/x-file-id"))
-            file_local_id = int(raw_data.decode())   # 我们存的是字符串
+            try:
+                file_ids = json.loads(raw_data.decode())
+                if isinstance(file_ids, int):  # 兼容旧格式
+                    file_ids = [file_ids]
+            except:
+                file_ids = [int(raw_data.decode())]
+
             if self.file_moved_callback:
-                self.file_moved_callback(file_local_id, dir_id)
+                for fid in file_ids:
+                    self.file_moved_callback(fid, dir_id)
             event.acceptProposedAction()
         else:
             event.ignore()

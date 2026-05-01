@@ -1,10 +1,12 @@
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
+import json
 
 class FileIconView(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)
@@ -12,16 +14,25 @@ class FileIconView(QListWidget):
         self._highlight_item = None
 
     def startDrag(self, supportedActions):
-        item = self.currentItem()
-        if not item: return
-        data = item.data(Qt.UserRole)
-        if not data or data[1] != 0: return
-        file_id = data[0]
+        # 收集所有选中的文件项
+        selected_items = self.selectedItems()
+        file_ids = []
+        for item in selected_items:
+            data = item.data(Qt.UserRole)
+            if data and data[1] == 0:  # 文件
+                file_ids.append(data[0])
+        if not file_ids:
+            return
+
+        import json
         mime = QMimeData()
-        mime.setData("application/x-file-id", str(file_id).encode())
+        mime.setData("application/x-file-id", json.dumps(file_ids).encode())
+
         drag = QDrag(self)
         drag.setMimeData(mime)
-        drag.setPixmap(item.icon().pixmap(48, 48))
+        # 图标用第一个选中项的图标
+        if selected_items:
+            drag.setPixmap(selected_items[0].icon().pixmap(48, 48))
         drag.exec(Qt.MoveAction)
 
     def dragEnterEvent(self, event):
@@ -52,10 +63,17 @@ class FileIconView(QListWidget):
             if not data or data[1] != 1:
                 return
             target_dir_id = data[0]
-            raw = bytes(event.mimeData().data("application/x-file-id"))
-            file_local_id = int(raw.decode())
+            raw_data = bytes(event.mimeData().data("application/x-file-id"))
+            try:
+                file_ids = json.loads(raw_data.decode())
+                if isinstance(file_ids, int):
+                    file_ids = [file_ids]
+            except:
+                file_ids = [int(raw_data.decode())]
+
             if self.move_file_callback:
-                self.move_file_callback(file_local_id, target_dir_id)
+                for fid in file_ids:
+                    self.move_file_callback(fid, target_dir_id)
             event.acceptProposedAction()
         else:
             super().dropEvent(event)
