@@ -20,7 +20,7 @@ class FileOperationHandler:
             if item and item[2] == 1:  # 目录
                 menu.addSeparator()
                 menu.addAction("✏️ 重命名", lambda: self.mw.rename_directory_from_table(idx))
-                menu.addAction("🗑 删除目录", lambda: self.mw.delete_directory_recursive(idx))
+                menu.addAction("🗑 删除目录", lambda: self.mw.delete_directory(idx))
 
         indexes = table.selectionModel().selectedRows()
         file_ids = self._get_selected_file_ids_from_table(indexes)

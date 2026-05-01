@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         self.list_action.triggered.connect(lambda: self.switch_view(0))
         self.icon_action.triggered.connect(lambda: self.switch_view(1))
 
-        self.status_label = QLabel("未选择 Bot")
+        self.status_label = QLabel("Pyrogram 未登录")
         self.statusBar().addPermanentWidget(self.status_label)
         self._update_status()
 
@@ -74,9 +74,9 @@ class MainWindow(QMainWindow):
         self.up_btn.clicked.connect(self.go_up)
         nav_layout.addWidget(self.up_btn)
 
-        # 面包屑容器 - 直接创建固定布局
+        # 面包屑容器
         self.breadcrumb_widget = QWidget()
-        self.breadcrumb_layout = QHBoxLayout(self.breadcrumb_widget)  # 布局直接挂在 widget 上
+        self.breadcrumb_layout = QHBoxLayout(self.breadcrumb_widget)
         self.breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
         self.breadcrumb_layout.setSpacing(2)
         self.breadcrumb_layout.setAlignment(Qt.AlignLeft)
@@ -87,7 +87,6 @@ class MainWindow(QMainWindow):
 
         # 视图栈
         self.view_stack = QStackedWidget()
-        # 右键菜单
         self.file_ops = FileOperationHandler(self)
 
         # 列表视图
@@ -176,7 +175,7 @@ class MainWindow(QMainWindow):
         return icon
 
     def go_up(self):
-        if len(self.dir_stack) <= 1:  # 栈中只有根目录
+        if len(self.dir_stack) <= 1:
             return
         parent_id = self.dir_stack[-2]
         self.set_current_directory(parent_id)
@@ -207,11 +206,11 @@ class MainWindow(QMainWindow):
 
     # ===== 批量上传 =====
     def start_bulk_upload(self, file_paths):
-        if not self._check_current_bot(): return
-        if not file_paths: return
-        bot = self.config.get_current_bot()
-        token = bot["token"]
-        chat_id = bot["chat_id"]
+        pyro = self._get_pyro_config()
+        chat_id = self._get_chat_id()
+        if not pyro or not chat_id:
+            self.show_status_message("请先在设置中完成Pyrogram登录并填写目标 Chat ID", error=True)
+            return
 
         upload_list = []
         for fp in file_paths:
@@ -221,7 +220,7 @@ class MainWindow(QMainWindow):
 
         dialog = UploadQueueDialog(upload_list, self)
         for fp, uid in upload_list:
-            task = UploadTask(token, chat_id, fp, self.config.config, uid)
+            task = UploadTask(pyro["session"], pyro["api_id"], pyro["api_hash"], chat_id, fp, uid)
             task.signals.finished.connect(self.on_bulk_upload_finished)
             task.signals.error.connect(self.on_bulk_upload_error)
             task.signals.finished.connect(dialog.task_finished)
@@ -231,9 +230,9 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def on_bulk_upload_finished(self, upload_id, file_id, msg_id, original_name, file_size):
-        bot = self.config.get_current_bot()
+        chat_id = self._get_chat_id()
         ext = os.path.splitext(original_name)[1].lower()
-        self.db.add_file(file_id, msg_id, bot["chat_id"], original_name, original_name,
+        self.db.add_file(file_id, msg_id, chat_id, original_name, original_name,
                          self.current_dir_id, file_size, ext)
         self._load_current_directory()
         self.show_status_message(f"上传成功: {original_name}")
@@ -257,6 +256,7 @@ class MainWindow(QMainWindow):
             if all_files:
                 self.start_bulk_upload(all_files)
 
+    # ===== 重命名 =====
     def _rename_file(self, local_id, old_name):
         new_name, ok = QInputDialog.getText(self, "重命名", "新名称:", text=old_name)
         if ok and new_name:
@@ -280,9 +280,9 @@ class MainWindow(QMainWindow):
             self.dir_model.refresh()
             self._load_current_directory()
 
+    # ===== 移动文件 =====
     def _move_file_dialog(self, local_id, file_name):
-        # 构建目录列表：包括“根目录”和所有子目录
-        dirs = self.db.get_directories()   # 返回所有目录 (id, name)
+        dirs = self.db.get_directories()
         items = ["根目录 (ID: 0)"] + [f"{d[1]} (ID: {d[0]})" for d in dirs]
         target, ok = QInputDialog.getItem(self, "移动到", f"选择目标文件夹：\n文件: {file_name}",
                                           items, 0, False)
@@ -290,7 +290,6 @@ class MainWindow(QMainWindow):
             if target.startswith("根目录"):
                 target_dir_id = 0
             else:
-                # 从类似 "目录名 (ID: 123)" 中提取ID
                 target_dir_id = int(target.split("(ID: ")[-1].rstrip(")"))
             self.db.move_file(local_id, target_dir_id)
             self._load_current_directory()
@@ -301,11 +300,12 @@ class MainWindow(QMainWindow):
         file_info = self.db.get_file_by_id(local_id)
         if not file_info: return
         message_id = file_info[2]
+        chat_id = file_info[3]
         self.db.delete_file(local_id)
         if message_id is not None:
-            bot = self.config.get_current_bot()
-            if bot:
-                task = DeleteMessageTask(bot["token"], bot["chat_id"], message_id)
+            pyro = self._get_pyro_config()
+            if pyro:
+                task = DeleteMessageTask(pyro["session"], pyro["api_id"], pyro["api_hash"], chat_id, message_id)
                 task.signals.error.connect(lambda e: self.show_status_message(f"远程删除失败: {e}", error=True))
                 self.threadpool.start(task)
 
@@ -321,7 +321,6 @@ class MainWindow(QMainWindow):
             self._delete_dir(data[0], item.text())
 
     def _delete_dir(self, dir_id, name):
-        # 获取该目录树下所有文件信息
         files = self.db.get_all_files_recursive(dir_id)
         count = len(files)
         msg = f"确定要删除目录 “{name}” 吗？\n将递归删除 {count} 个文件及其子目录，且无法恢复。"
@@ -330,37 +329,34 @@ class MainWindow(QMainWindow):
 
         confirm = QMessageBox.question(self, "确认删除", msg)
         if confirm == QMessageBox.Yes:
-            # 同步删除 Telegram 消息
             if files:
-                bot = self.config.get_current_bot()
-                if bot:
-                    token = bot["token"]
+                pyro = self._get_pyro_config()
+                if pyro:
                     for fid, msg_id, chat_id in files:
                         if msg_id is not None:
-                            task = DeleteMessageTask(token, chat_id, msg_id)
-                            task.signals.error.connect(
-                                lambda e: self.show_status_message(f"远程删除失败: {e}", error=True)
-                            )
+                            task = DeleteMessageTask(pyro["session"], pyro["api_id"], pyro["api_hash"], chat_id, msg_id)
+                            task.signals.error.connect(lambda e: self.show_status_message(f"远程删除失败: {e}", error=True))
                             self.threadpool.start(task)
-            # 数据库递归删除
             self.db.delete_directory_recursive(dir_id)
             self.dir_model.refresh()
             self._load_current_directory()
             self.show_status_message(f"目录 “{name}” 已删除")
 
-    def _start_download(self, item):
-        file_info = self.db.get_file_by_id(item[0])
-        self._start_download_from_info(file_info)
-
+    # ===== 下载 =====
     def _start_download_from_info(self, file_info):
         if not file_info: return
         file_id = file_info[1]
-        default_name = file_info[4] if file_info[4] else "file"
-        save_path, _ = QFileDialog.getSaveFileName(self, "保存文件",
-                                                   os.path.join(self.config.config.get("download_path", ""), default_name))
+        default_name = file_info[4] or file_info[5] or "file"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "保存文件",
+            os.path.join(self.config.config.get("download_path", ""), default_name)
+        )
         if not save_path: return
-        bot = self.config.get_current_bot()
-        task = DownloadTask(bot["token"], file_id, save_path)
+        pyro = self._get_pyro_config()
+        if not pyro:
+            self.show_status_message("请先完成Pyrogram登录", error=True)
+            return
+        task = DownloadTask(pyro["session"], pyro["api_id"], pyro["api_hash"], file_id, save_path)
         task.signals.finished.connect(lambda p: self.show_status_message(f"下载完成: {p}"))
         task.signals.error.connect(lambda e: self.show_status_message(f"下载失败: {e}", error=True))
         self.show_status_message("下载中...", progress=True)
@@ -374,10 +370,7 @@ class MainWindow(QMainWindow):
             self.dir_model.refresh()
             self._load_current_directory()
 
-    def _show_properties_dialog(self, item):
-        file_info = self.db.get_file_by_id(item[0])
-        self._show_properties_from_db(file_info)
-
+    # ===== 属性 =====
     def _show_properties_from_db(self, file_info):
         if not file_info: return
         msg = f"""文件名称: {file_info[4] or file_info[5]}
@@ -399,7 +392,7 @@ Chat ID: {file_info[3]}
             size /= 1024
         return f"{size:.1f} TB"
 
-    # ===== 文件移动（拖拽回调） =====
+    # ===== 拖拽回调 =====
     def on_file_moved_to_dir(self, file_local_id, target_dir_id):
         self.db.move_file(file_local_id, target_dir_id)
         self._load_current_directory()
@@ -463,16 +456,25 @@ Chat ID: {file_info[3]}
             self._update_status()
             self.dir_model.refresh()
 
-    def _check_current_bot(self):
-        bot = self.config.get_current_bot()
-        if not bot:
-            QMessageBox.warning(self, "提示", "请先在设置中配置并选择 Bot")
-            return False
-        return True
-
     def _update_status(self):
-        bot = self.config.get_current_bot()
-        if bot:
-            self.status_label.setText(f"当前 Bot: {bot['name']}")
+        pyro = self.config.config.get("pyrogram", {})
+        if pyro.get("session_string"):
+            self.status_label.setText("Pyrogram 已登录")
         else:
-            self.status_label.setText("未选择 Bot")
+            self.status_label.setText("Pyrogram 未登录")
+
+    def _get_pyro_config(self):
+        pyro = self.config.config.get("pyrogram", {})
+        session = pyro.get("session_string")
+        api_id = pyro.get("api_id")
+        api_hash = pyro.get("api_hash")
+        if not all([session, api_id, api_hash]):
+            return None
+        return {"session": session, "api_id": api_id, "api_hash": api_hash}
+
+    def _get_chat_id(self):
+        chat_id = self.config.config.get("pyrogram", {}).get("chat_id", "")
+        try:
+            return int(chat_id)
+        except:
+            return None
