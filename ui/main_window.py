@@ -4,10 +4,13 @@ from PySide6.QtCore import *
 from PySide6.QtGui import *
 from core.config_manager import ConfigManager
 from core.db_manager import DBManager
-from ui.file_table_model import FileTableModel
+from model.directory_tree_model import DirectoryTreeModel
+from model.file_table_model import FileTableModel
 from ui.upload_task import UploadTask
 from ui.settings_dialog import SettingsDialog
-from ui.directory_tree import DirectoryTreeModel, DirTreeView
+from ui.directory_tree import DirTreeView
+from ui.file_table import FileTableView
+from ui.file_icon import FileIconView
 from ui.upload_dialog import UploadQueueDialog
 
 # ---------- 下载任务 ----------
@@ -69,124 +72,6 @@ class DeleteMessageTask(QRunnable):
             self.signals.finished.emit()
         except Exception as e:
             self.signals.error.emit(str(e))
-
-# ---------- 自定义表格视图（支持拖出文件 + 放入目录） ----------
-class FileTableView(QTableView):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.move_file_callback = None   # 主窗口设置
-
-    def startDrag(self, supportedActions):
-        indexes = self.selectionModel().selectedRows()
-        if not indexes:
-            return
-        idx = indexes[0]
-        file_model = self.model()
-        if not hasattr(file_model, 'get_item'):
-            super().startDrag(supportedActions)
-            return
-        item = file_model.get_item(idx.row())
-        if not item or item[2] != 0:  # 不是文件
-            return
-        file_id = item[0]
-        mime = QMimeData()
-        mime.setData("application/x-file-id", str(file_id).encode())
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        # 设置拖拽图标
-        icon = idx.data(Qt.DecorationRole)
-        if icon and hasattr(icon, 'pixmap'):
-            drag.setPixmap(icon.pixmap(48, 48))
-        else:
-            # 默认图标
-            drag.setPixmap(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon).pixmap(48, 48))
-        drag.exec(Qt.MoveAction)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat("application/x-file-id"):
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat("application/x-file-id"):
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
-
-    def dropEvent(self, event):
-        if event.mimeData().hasFormat("application/x-file-id"):
-            target_index = self.indexAt(event.pos())
-            if not target_index.isValid():
-                return
-            file_model = self.model()
-            if not hasattr(file_model, 'get_item'):
-                return
-            item = file_model.get_item(target_index.row())
-            if not item or item[2] != 1:  # 不是目录
-                return
-            target_dir_id = item[0]
-            raw = bytes(event.mimeData().data("application/x-file-id"))
-            file_local_id = int(raw.decode())
-            if self.move_file_callback:
-                self.move_file_callback(file_local_id, target_dir_id)
-            event.acceptProposedAction()
-        else:
-            super().dropEvent(event)
-
-# ---------- 自定义图标视图（支持拖出 + 放入目录） ----------
-class FileIconView(QListWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.move_file_callback = None
-
-    def startDrag(self, supportedActions):
-        item = self.currentItem()
-        if not item: return
-        data = item.data(Qt.UserRole)
-        if not data or data[1] != 0: return
-        file_id = data[0]
-        mime = QMimeData()
-        mime.setData("application/x-file-id", str(file_id).encode())
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.setPixmap(item.icon().pixmap(48, 48))
-        drag.exec(Qt.MoveAction)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat("application/x-file-id"):
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat("application/x-file-id"):
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
-
-    def dropEvent(self, event):
-        if event.mimeData().hasFormat("application/x-file-id"):
-            item = self.itemAt(event.pos())
-            if not item:
-                return
-            data = item.data(Qt.UserRole)
-            if not data or data[1] != 1:  # 不是目录
-                return
-            target_dir_id = data[0]
-            raw = bytes(event.mimeData().data("application/x-file-id"))
-            file_local_id = int(raw.decode())
-            if self.move_file_callback:
-                self.move_file_callback(file_local_id, target_dir_id)
-            event.acceptProposedAction()
-        else:
-            super().dropEvent(event)
 
 # ========== 主窗口 ==========
 class MainWindow(QMainWindow):

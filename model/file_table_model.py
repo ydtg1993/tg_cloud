@@ -1,5 +1,6 @@
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QFileInfo
 from PySide6.QtWidgets import QApplication, QStyle, QFileIconProvider
+from PySide6.QtGui import QColor
 
 class FileTableModel(QAbstractTableModel):
     HEADERS = ["名称", "大小", "修改时间", "类型"]
@@ -9,6 +10,7 @@ class FileTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items = []
+        self._backgrounds = {}
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._items)
@@ -19,7 +21,10 @@ class FileTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
+        row = index.row()
         item = self._items[index.row()]
+        if role == Qt.BackgroundRole:
+            return self._backgrounds.get(row)  # 默认返回 None，保持样式表背景
         is_dir = item[2]
         if role == Qt.DisplayRole:
             col = index.column()
@@ -57,6 +62,17 @@ class FileTableModel(QAbstractTableModel):
             return (item[0], is_dir)
         return None
 
+    def setData(self, index, value, role=Qt.EditRole):
+        if role == Qt.BackgroundRole:
+            row = index.row()
+            if value is None or (isinstance(value, QColor) and not value.isValid()):
+                self._backgrounds.pop(row, None)
+            else:
+                self._backgrounds[row] = value
+            self.dataChanged.emit(index, index, [Qt.BackgroundRole])
+            return True
+        return super().setData(index, value, role)
+
     def _get_system_icon(self, filename):
         """通过文件扩展名获取系统关联图标，带简单缓存"""
         if not filename:
@@ -84,3 +100,14 @@ class FileTableModel(QAbstractTableModel):
         if 0 <= row < len(self._items):
             return self._items[row]
         return None
+
+    def flags(self, index):
+        default_flags = super().flags(index)
+        if not index.isValid():
+            return default_flags
+        item = self._items[index.row()]
+        if item[2] == 0:  # 是文件
+            default_flags |= Qt.ItemIsDragEnabled
+        # 如果希望目录行也能接受放置（内部拖放），可以始终启用，不影响功能
+        default_flags |= Qt.ItemIsDropEnabled
+        return default_flags

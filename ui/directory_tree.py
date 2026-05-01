@@ -1,37 +1,7 @@
-from PySide6.QtGui import QStandardItemModel, QStandardItem
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QTreeView
-
-class DirectoryTreeModel(QStandardItemModel):
-    def __init__(self, db, parent=None):
-        super().__init__(parent)
-        self.db = db
-        self.setHorizontalHeaderLabels(["目录"])
-        self.root_item = self.invisibleRootItem()
-        self.refresh()
-
-    def refresh(self):
-        self.removeRows(0, self.rowCount())
-        dirs = self.db.get_directories(parent_id=0)
-        for d in dirs:
-            item = QStandardItem(d[1])
-            item.setData(d[0], Qt.UserRole)  # id
-            item.setEditable(False)
-            self.root_item.appendRow(item)
-            self._add_children(item, d[0])
-
-    def _add_children(self, parent_item, parent_id):
-        children = self.db.get_directories(parent_id)
-        for child in children:
-            item = QStandardItem(child[1])
-            item.setData(child[0], Qt.UserRole)
-            item.setEditable(False)
-            parent_item.appendRow(item)
-            self._add_children(item, child[0])
-
-    def add_directory(self, name, parent_id=0):
-        self.db.add_directory(name, parent_id)
-        self.refresh()
+from PySide6.QtGui import QColor
+from PySide6.QtCore import QPersistentModelIndex
 
 class DirTreeView(QTreeView):
     def __init__(self, db, parent=None):
@@ -40,20 +10,30 @@ class DirTreeView(QTreeView):
         self.setDragDropMode(QTreeView.DropOnly)
         self.setAcceptDrops(True)
         self.file_moved_callback = None
+        self._highlight_index = QModelIndex()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat("application/x-file-id"):
             event.acceptProposedAction()
+            # 允许时立即更新高亮
+            self._update_highlight(event.pos())
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasFormat("application/x-file-id"):
             event.acceptProposedAction()
+            self._update_highlight(event.pos())
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event):
+        self._clear_highlight()
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):
+        # 先清除高亮
+        self._clear_highlight()
         if event.mimeData().hasFormat("application/x-file-id"):
             index = self.indexAt(event.pos())
             if not index.isValid():
@@ -67,3 +47,21 @@ class DirTreeView(QTreeView):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def _update_highlight(self, pos):
+        index = self.indexAt(pos)
+        # 清除上一个高亮
+        if self._highlight_index.isValid():
+            self.model().setData(self._highlight_index, QColor(), Qt.BackgroundRole)
+            self._highlight_index = QModelIndex()
+
+        if index.isValid():
+            # 只有目录项才高亮（所有项都是目录，所以可直接高亮）
+            self.model().setData(index, QColor(100, 149, 237, 80), Qt.BackgroundRole)  # 矢车菊蓝半透明
+            # 为确保视图刷新，使用 QPersistentModelIndex
+            self._highlight_index = QPersistentModelIndex(index)
+
+    def _clear_highlight(self):
+        if self._highlight_index.isValid():
+            self.model().setData(self._highlight_index, QColor(), Qt.BackgroundRole)
+            self._highlight_index = QModelIndex()
