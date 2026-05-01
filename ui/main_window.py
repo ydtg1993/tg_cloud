@@ -10,7 +10,7 @@ from ui.settings_dialog import SettingsDialog
 from ui.directory_tree import DirectoryTreeModel, DirTreeView
 from ui.upload_dialog import UploadQueueDialog
 
-# 下载任务（不变）
+# ---------- 下载任务 ----------
 class DownloadTask(QRunnable):
     class Signals(QObject):
         finished = Signal(str)
@@ -44,7 +44,7 @@ class DownloadTask(QRunnable):
         except Exception as e:
             self.signals.error.emit(str(e))
 
-# Telegram 消息删除任务（新增）
+# ---------- 删除任务 ----------
 class DeleteMessageTask(QRunnable):
     class Signals(QObject):
         finished = Signal()
@@ -70,8 +70,82 @@ class DeleteMessageTask(QRunnable):
         except Exception as e:
             self.signals.error.emit(str(e))
 
-# 自定义图标视图（支持拖拽携带ID）
+# ---------- 自定义表格视图（支持拖出文件 + 放入目录） ----------
+class FileTableView(QTableView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.move_file_callback = None   # 主窗口设置
+
+    def startDrag(self, supportedActions):
+        indexes = self.selectionModel().selectedRows()
+        if not indexes:
+            return
+        idx = indexes[0]
+        file_model = self.model()
+        if not hasattr(file_model, 'get_item'):
+            super().startDrag(supportedActions)
+            return
+        item = file_model.get_item(idx.row())
+        if not item or item[2] != 0:  # 不是文件
+            return
+        file_id = item[0]
+        mime = QMimeData()
+        mime.setData("application/x-file-id", str(file_id).encode())
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        # 设置拖拽图标
+        icon = idx.data(Qt.DecorationRole)
+        if icon and hasattr(icon, 'pixmap'):
+            drag.setPixmap(icon.pixmap(48, 48))
+        else:
+            # 默认图标
+            drag.setPixmap(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon).pixmap(48, 48))
+        drag.exec(Qt.MoveAction)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-file-id"):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-file-id"):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat("application/x-file-id"):
+            target_index = self.indexAt(event.pos())
+            if not target_index.isValid():
+                return
+            file_model = self.model()
+            if not hasattr(file_model, 'get_item'):
+                return
+            item = file_model.get_item(target_index.row())
+            if not item or item[2] != 1:  # 不是目录
+                return
+            target_dir_id = item[0]
+            raw = bytes(event.mimeData().data("application/x-file-id"))
+            file_local_id = int(raw.decode())
+            if self.move_file_callback:
+                self.move_file_callback(file_local_id, target_dir_id)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
+
+# ---------- 自定义图标视图（支持拖出 + 放入目录） ----------
 class FileIconView(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.move_file_callback = None
+
     def startDrag(self, supportedActions):
         item = self.currentItem()
         if not item: return
@@ -85,13 +159,43 @@ class FileIconView(QListWidget):
         drag.setPixmap(item.icon().pixmap(48, 48))
         drag.exec(Qt.MoveAction)
 
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-file-id"):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-file-id"):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat("application/x-file-id"):
+            item = self.itemAt(event.pos())
+            if not item:
+                return
+            data = item.data(Qt.UserRole)
+            if not data or data[1] != 1:  # 不是目录
+                return
+            target_dir_id = data[0]
+            raw = bytes(event.mimeData().data("application/x-file-id"))
+            file_local_id = int(raw.decode())
+            if self.move_file_callback:
+                self.move_file_callback(file_local_id, target_dir_id)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
+
+# ========== 主窗口 ==========
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config = ConfigManager()
         self.db = DBManager()
         self.threadpool = QThreadPool()
-        self.upload_counter = 0          # 修复：初始化 upload_counter
+        self.upload_counter = 0
         self.current_dir_id = 0
         self.dir_stack = [0]
         self.icon_provider = QFileIconProvider()
@@ -149,15 +253,14 @@ class MainWindow(QMainWindow):
         self.view_stack = QStackedWidget()
 
         # 列表视图
-        self.file_table = QTableView()
+        self.file_table = FileTableView()
         self.file_model = FileTableModel()
         self.file_table.setModel(self.file_model)
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.file_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_table.customContextMenuRequested.connect(self.table_context_menu)
         self.file_table.doubleClicked.connect(self.on_item_double_clicked)
-        self.file_table.setDragEnabled(True)
-        self.file_table.setDragDropMode(QAbstractItemView.DragOnly)
+        self.file_table.move_file_callback = self.on_file_moved_to_dir
         self.file_table.setColumnWidth(0, 300)
         self.file_table.setColumnWidth(1, 100)
         self.file_table.setColumnWidth(2, 150)
@@ -172,7 +275,7 @@ class MainWindow(QMainWindow):
         self.icon_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.icon_view.customContextMenuRequested.connect(self.icon_context_menu)
         self.icon_view.doubleClicked.connect(self.icon_double_clicked)
-        self.icon_view.setDragEnabled(True)
+        self.icon_view.move_file_callback = self.on_file_moved_to_dir
         self.view_stack.addWidget(self.icon_view)
 
         self.view_stack.setCurrentIndex(0)
@@ -186,9 +289,14 @@ class MainWindow(QMainWindow):
         self.status_text = QLabel("就绪")
         status_layout.addWidget(self.progress_bar, 3)
         status_layout.addWidget(self.status_text, 1)
-        right_layout.addLayout(status_layout)
+        right_layout.addWidget(status_widget)
 
         main_layout.addLayout(right_layout, 3)
+
+    # ===== 视图切换 =====
+    def switch_view(self, index):
+        self.view_stack.setCurrentIndex(index)
+        self._load_current_directory()
 
     # ===== 目录加载 =====
     def _load_current_directory(self):
@@ -270,7 +378,7 @@ class MainWindow(QMainWindow):
                 self.current_dir_id = data[0]
                 self._load_current_directory()
 
-    # ===== 批量上传（对话框） =====
+    # ===== 批量上传 =====
     def start_bulk_upload(self, file_paths):
         if not self._check_current_bot(): return
         if not file_paths: return
@@ -285,7 +393,6 @@ class MainWindow(QMainWindow):
             upload_list.append((fp, uid))
 
         dialog = UploadQueueDialog(upload_list, self)
-        # 创建任务并连接信号
         for fp, uid in upload_list:
             task = UploadTask(token, chat_id, fp, self.config.config, uid)
             task.signals.progress.connect(dialog.task_started)
@@ -294,8 +401,7 @@ class MainWindow(QMainWindow):
             task.signals.finished.connect(dialog.task_finished)
             task.signals.error.connect(dialog.task_error)
             self.threadpool.start(task)
-            dialog.task_started(uid)   # 触发开始状态
-
+            dialog.task_started(uid)
         dialog.exec()
 
     def on_bulk_upload_finished(self, upload_id, file_id, msg_id, original_name, file_size):
@@ -322,6 +428,7 @@ class MainWindow(QMainWindow):
                 menu.addSeparator()
                 menu.addAction("⬇️ 下载", lambda: self.download_file(idx))
                 menu.addAction("✏️ 重命名", lambda: self.rename_file_from_table(idx))
+                menu.addAction("📂 移动到...", lambda: self.move_file_from_table(idx))
                 menu.addAction("🗑 删除", lambda: self.delete_files([idx]))
                 menu.addAction("📋 属性", lambda: self.show_file_properties(idx))
             elif item and item[2] == 1:
@@ -342,6 +449,7 @@ class MainWindow(QMainWindow):
                 menu.addSeparator()
                 menu.addAction("⬇️ 下载", lambda: self.download_icon_file(item))
                 menu.addAction("✏️ 重命名", lambda: self.rename_file_from_icon(item))
+                menu.addAction("📂 移动到...", lambda: self.move_file_from_icon(item))
                 menu.addAction("🗑 删除", lambda: self.delete_icon_files([item]))
                 menu.addAction("📋 属性", lambda: self.show_icon_properties(item))
             elif data and data[1] == 1:
@@ -366,7 +474,7 @@ class MainWindow(QMainWindow):
             if all_files:
                 self.start_bulk_upload(all_files)
 
-    # ===== 文件/目录重命名 =====
+    # ===== 重命名 =====
     def rename_file_from_table(self, index):
         item = self.file_model.get_item(index.row())
         if item and item[2] == 0:
@@ -400,16 +508,39 @@ class MainWindow(QMainWindow):
             self.dir_model.refresh()
             self._load_current_directory()
 
-    # ===== 删除文件（同步 Telegram） =====
-    def _delete_file_with_telegram(self, local_id):
-        """删除本地数据库记录，并尝试删除 Telegram 上的消息"""
-        file_info = self.db.get_file_by_id(local_id)
-        if not file_info:
-            return
-        message_id = file_info[2]  # message_id 字段
-        self.db.delete_file(local_id)   # 先删除本地，确保即使远程失败也清理本地
+    # ===== 移动文件（右键“移动到...”） =====
+    def move_file_from_table(self, index):
+        item = self.file_model.get_item(index.row())
+        if item and item[2] == 0:
+            self._move_file_dialog(item[0], item[5] or item[4])
 
-        # 如果有有效的 message_id，则远程删除
+    def move_file_from_icon(self, list_item):
+        data = list_item.data(Qt.UserRole)
+        if data and data[1] == 0:
+            self._move_file_dialog(data[0], list_item.text())
+
+    def _move_file_dialog(self, local_id, file_name):
+        # 构建目录列表：包括“根目录”和所有子目录
+        dirs = self.db.get_directories()   # 返回所有目录 (id, name)
+        items = ["根目录 (ID: 0)"] + [f"{d[1]} (ID: {d[0]})" for d in dirs]
+        target, ok = QInputDialog.getItem(self, "移动到", f"选择目标文件夹：\n文件: {file_name}",
+                                          items, 0, False)
+        if ok and target:
+            if target.startswith("根目录"):
+                target_dir_id = 0
+            else:
+                # 从类似 "目录名 (ID: 123)" 中提取ID
+                target_dir_id = int(target.split("(ID: ")[-1].rstrip(")"))
+            self.db.move_file(local_id, target_dir_id)
+            self._load_current_directory()
+            self.show_status_message(f"文件已移动到 {target}")
+
+    # ===== 删除（同步 Telegram） =====
+    def _delete_file_with_telegram(self, local_id):
+        file_info = self.db.get_file_by_id(local_id)
+        if not file_info: return
+        message_id = file_info[2]
+        self.db.delete_file(local_id)
         if message_id is not None:
             bot = self.config.get_current_bot()
             if bot:
@@ -529,7 +660,7 @@ Chat ID: {file_info[3]}
             size /= 1024
         return f"{size:.1f} TB"
 
-    # ===== 文件移动 =====
+    # ===== 文件移动（拖拽回调） =====
     def on_file_moved_to_dir(self, file_local_id, target_dir_id):
         self.db.move_file(file_local_id, target_dir_id)
         self._load_current_directory()
