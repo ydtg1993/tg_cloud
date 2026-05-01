@@ -222,7 +222,6 @@ class MainWindow(QMainWindow):
         dialog = UploadQueueDialog(upload_list, self)
         for fp, uid in upload_list:
             task = UploadTask(token, chat_id, fp, self.config.config, uid)
-            task.signals.progress.connect(dialog.task_started)
             task.signals.finished.connect(self.on_bulk_upload_finished)
             task.signals.error.connect(self.on_bulk_upload_error)
             task.signals.finished.connect(dialog.task_finished)
@@ -322,11 +321,32 @@ class MainWindow(QMainWindow):
             self._delete_dir(data[0], item.text())
 
     def _delete_dir(self, dir_id, name):
-        confirm = QMessageBox.question(self, "确认删除", f"删除目录 “{name}” 及其内部文件将移至根目录，确认？")
+        # 获取该目录树下所有文件信息
+        files = self.db.get_all_files_recursive(dir_id)
+        count = len(files)
+        msg = f"确定要删除目录 “{name}” 吗？\n将递归删除 {count} 个文件及其子目录，且无法恢复。"
+        if count > 0:
+            msg += "\n（将同步删除 Telegram 中的对应消息）"
+
+        confirm = QMessageBox.question(self, "确认删除", msg)
         if confirm == QMessageBox.Yes:
-            self.db.delete_directory(dir_id)
+            # 同步删除 Telegram 消息
+            if files:
+                bot = self.config.get_current_bot()
+                if bot:
+                    token = bot["token"]
+                    for fid, msg_id, chat_id in files:
+                        if msg_id is not None:
+                            task = DeleteMessageTask(token, chat_id, msg_id)
+                            task.signals.error.connect(
+                                lambda e: self.show_status_message(f"远程删除失败: {e}", error=True)
+                            )
+                            self.threadpool.start(task)
+            # 数据库递归删除
+            self.db.delete_directory_recursive(dir_id)
             self.dir_model.refresh()
             self._load_current_directory()
+            self.show_status_message(f"目录 “{name}” 已删除")
 
     def _start_download(self, item):
         file_info = self.db.get_file_by_id(item[0])

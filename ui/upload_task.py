@@ -4,7 +4,6 @@ from PySide6.QtCore import QRunnable, Signal, QObject
 from core.telegram_uploader import get_uploader
 
 class UploadSignals(QObject):
-    progress = Signal(str, int)        # upload_id, 百分比 (0-100)
     finished = Signal(str, str, int, str, int)  # upload_id, file_id, msg_id, original_name, file_size
     error = Signal(str, str)          # upload_id, error_msg
 
@@ -21,8 +20,7 @@ class UploadTask(QRunnable):
 
     def run(self):
         try:
-            # 发送开始进度
-            self.signals.progress.emit(self.upload_id, 10)
+            # 不发送 progress 信号，对话框会在 task_started 时直接显示忙碌
             size = os.path.getsize(self.file_path)
             uploader = get_uploader(size, self.config)
             loop = asyncio.new_event_loop()
@@ -30,8 +28,6 @@ class UploadTask(QRunnable):
             file_id, msg_id = loop.run_until_complete(
                 uploader.upload(self.token, self.chat_id, self.file_path)
             )
-            # 完成
-            self.signals.progress.emit(self.upload_id, 100)
             self.signals.finished.emit(self.upload_id, file_id, msg_id,
                                        os.path.basename(self.file_path), size)
         except Exception as e:

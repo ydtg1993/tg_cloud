@@ -65,12 +65,6 @@ class DBManager:
         )
         self.conn.commit()
 
-    def delete_directory(self, dir_id):
-        self.conn.execute("UPDATE files SET directory_id=0 WHERE directory_id=?", (dir_id,))
-        self.conn.execute("UPDATE directories SET parent_id=0 WHERE parent_id=?", (dir_id,))
-        self.conn.execute("DELETE FROM directories WHERE id=?", (dir_id,))
-        self.conn.commit()
-
     def rename_directory(self, dir_id, new_name):
         self.conn.execute("UPDATE directories SET name=? WHERE id=?", (new_name, dir_id))
         self.conn.commit()
@@ -124,3 +118,53 @@ class DBManager:
         for seg in reversed(segments):
             path.append(seg)
         return path
+
+    def get_all_files_recursive(self, dir_id):
+        """返回指定目录及其所有子目录下的文件 (id, message_id, chat_id) 列表"""
+        # 收集所有子目录 ID
+        dirs_to_process = [dir_id]
+        all_dirs = [dir_id]
+        while dirs_to_process:
+            current = dirs_to_process.pop()
+            children = self.conn.execute(
+                "SELECT id FROM directories WHERE parent_id=?", (current,)
+            ).fetchall()
+            for c in children:
+                all_dirs.append(c[0])
+                dirs_to_process.append(c[0])
+
+        # 查询这些目录下的所有文件
+        if not all_dirs:
+            return []
+        placeholders = ','.join('?' for _ in all_dirs)
+        files = self.conn.execute(
+            f"SELECT id, message_id, chat_id FROM files WHERE directory_id IN ({placeholders})",
+            all_dirs
+        ).fetchall()
+        return files  # [(id, message_id, chat_id), ...]
+
+    def delete_directory_recursive(self, dir_id):
+        """递归删除目录及其所有子目录和文件（数据库操作）"""
+        # 递归收集所有子目录
+        dirs_to_delete = []
+
+        def collect_dirs(did):
+            dirs_to_delete.append(did)
+            children = self.conn.execute(
+                "SELECT id FROM directories WHERE parent_id=?", (did,)
+            ).fetchall()
+            for c in children:
+                collect_dirs(c[0])
+
+        collect_dirs(dir_id)
+
+        # 删除这些目录下的所有文件
+        placeholders = ','.join('?' for _ in dirs_to_delete)
+        self.conn.execute(
+            f"DELETE FROM files WHERE directory_id IN ({placeholders})",
+            dirs_to_delete
+        )
+        # 删除目录（逆序删除避免子目录约束，但无外键，顺序任意）
+        for did in reversed(dirs_to_delete):
+            self.conn.execute("DELETE FROM directories WHERE id=?", (did,))
+        self.conn.commit()

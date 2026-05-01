@@ -84,20 +84,25 @@ class UploadQueueDialog(QDialog):
 
     def task_started(self, upload_id):
         if upload_id in self.upload_items:
-            self.upload_items[upload_id].set_status("上传中", "blue")
-            self.upload_items[upload_id].set_progress(10)
+            item = self.upload_items[upload_id]
+            item.set_status("上传中", "blue")
+            item.progress_bar.setRange(0, 0)      # 忙碌模式
+            item.progress_bar.setValue(0)
 
     def task_finished(self, upload_id):
         if upload_id in self.upload_items:
             item = self.upload_items[upload_id]
             item.set_status("完成", "green")
-            item.set_progress(100)
+            item.progress_bar.setRange(0, 100)    # 恢复正常
+            item.progress_bar.setValue(100)
             self._one_done()
 
     def task_error(self, upload_id, error_msg):
         if upload_id in self.upload_items:
             item = self.upload_items[upload_id]
             item.set_status(f"失败: {error_msg}", "red")
+            item.progress_bar.setRange(0, 100)    # 恢复正常
+            item.progress_bar.setValue(0)
             self._one_done()
 
     def _one_done(self):
