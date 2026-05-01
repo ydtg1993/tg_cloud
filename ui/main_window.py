@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self._setup_ui()
         self._load_current_directory()
+        self._update_breadcrumb()
 
     def _setup_ui(self):
         menubar = self.menuBar()
@@ -127,11 +128,16 @@ class MainWindow(QMainWindow):
         nav_layout = QHBoxLayout()
         self.up_btn = QPushButton("⬆️ 向上")
         self.up_btn.clicked.connect(self.go_up)
-        self.path_label = QLabel("根目录")
-        self.path_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         nav_layout.addWidget(self.up_btn)
-        nav_layout.addWidget(self.path_label)
-        nav_layout.addStretch()
+
+        # 面包屑容器 - 直接创建固定布局
+        self.breadcrumb_widget = QWidget()
+        self.breadcrumb_layout = QHBoxLayout(self.breadcrumb_widget)  # 布局直接挂在 widget 上
+        self.breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
+        self.breadcrumb_layout.setSpacing(2)
+        self.breadcrumb_layout.setAlignment(Qt.AlignLeft)
+        nav_layout.addWidget(self.breadcrumb_widget, 1)
+
         right_layout.addLayout(nav_layout)
 
         # 视图栈
@@ -211,7 +217,6 @@ class MainWindow(QMainWindow):
             list_item.setToolTip(f"名称: {name}\n大小: {size_str}\n类型: {type_str}")
             list_item.setData(Qt.UserRole, (item[0], is_dir))
             self.icon_view.addItem(list_item)
-        self.update_path_label()
 
     def _get_system_icon(self, filename):
         if not filename:
@@ -223,45 +228,69 @@ class MainWindow(QMainWindow):
             return QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         return icon
 
-    def update_path_label(self):
-        if self.current_dir_id == 0:
-            self.path_label.setText("根目录")
-            self.up_btn.setEnabled(False)
-        else:
-            self.path_label.setText(f"目录 {self.current_dir_id}")
-            self.up_btn.setEnabled(True)
-
     def go_up(self):
-        if self.current_dir_id == 0: return
-        if len(self.dir_stack) > 1:
-            self.dir_stack.pop()
-            self.current_dir_id = self.dir_stack[-1]
-        else:
-            self.current_dir_id = 0
-            self.dir_stack = [0]
+        if len(self.dir_stack) <= 1:  # 栈中只有根目录
+            return
+        parent_id = self.dir_stack[-2]
+        self.set_current_directory(parent_id)
+
+    def set_current_directory(self, dir_id):
+        """跳转到指定目录，并更新栈与界面"""
+        path = self.db.get_path_to_directory(dir_id)
+        self.dir_stack = [item[0] for item in path]  # 用完整路径 id 列表替换栈
+        self.current_dir_id = dir_id
         self._load_current_directory()
+        self._update_breadcrumb()
+
+    def _update_breadcrumb(self):
+        """根据当前路径重新构建面包屑（仅清空控件，保留布局）"""
+        layout = self.breadcrumb_layout
+
+        # 清空布局中所有控件（保留 Spacer 等，后面会统一清理）
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        # 重新添加面包屑项
+        path = self.db.get_path_to_directory(self.current_dir_id)
+        for i, (dir_id, name) in enumerate(path):
+            if i > 0:  # 分隔符
+                sep = QLabel(">")
+                sep.setStyleSheet("color: #888;")
+                layout.addWidget(sep)
+
+            btn = QPushButton(name)
+            btn.setFlat(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            if dir_id == self.current_dir_id:
+                btn.setStyleSheet(
+                    "font-weight: bold; color: #fff; border: none; background: transparent; padding: 2px 6px;")
+            else:
+                btn.setStyleSheet("color: #ccc; border: none; background: transparent; padding: 2px 6px;")
+            # 点击跳转
+            btn.clicked.connect(lambda checked, d=dir_id: self.set_current_directory(d))
+            layout.addWidget(btn)
+
+        layout.addStretch()
+        self.up_btn.setEnabled(self.current_dir_id != 0)
 
     def on_dir_clicked(self, index):
         dir_id = index.data(Qt.UserRole)
-        self.dir_stack.append(dir_id)
-        self.current_dir_id = dir_id
-        self._load_current_directory()
+        self.set_current_directory(dir_id)
 
     def on_item_double_clicked(self, index):
         item = self.file_model.get_item(index.row())
         if item and item[2] == 1:
-            self.dir_stack.append(item[0])
-            self.current_dir_id = item[0]
-            self._load_current_directory()
+            self.set_current_directory(item[0])
 
     def icon_double_clicked(self, idx):
         item = self.icon_view.currentItem()
         if item:
             data = item.data(Qt.UserRole)
             if data and data[1] == 1:
-                self.dir_stack.append(data[0])
-                self.current_dir_id = data[0]
-                self._load_current_directory()
+                self.set_current_directory(data[0])
 
     # ===== 批量上传 =====
     def start_bulk_upload(self, file_paths):

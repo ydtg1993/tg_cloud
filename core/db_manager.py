@@ -104,3 +104,23 @@ class DBManager:
     def get_file_by_id(self, local_id):
         cur = self.conn.execute("SELECT * FROM files WHERE id=?", (local_id,))
         return cur.fetchone()
+
+    def get_path_to_directory(self, dir_id):
+        """返回从根目录到指定目录的完整路径列表 [(id, name), ...]，包含虚拟根(id=0)"""
+        path = [(0, "根目录")]
+        if dir_id == 0:
+            return path
+        segments = []
+        current = dir_id
+        while current:
+            row = self.conn.execute(
+                "SELECT id, name, parent_id FROM directories WHERE id=?", (current,)
+            ).fetchone()
+            if not row:
+                break
+            segments.append((row[0], row[1]))
+            current = row[2]  # parent_id
+        # 反转并追加到根目录后面
+        for seg in reversed(segments):
+            path.append(seg)
+        return path
