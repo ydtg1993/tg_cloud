@@ -11,12 +11,13 @@ class DownloadTask(QRunnable):
         finished = Signal(str)
         error = Signal(str)
 
-    def __init__(self, session_string, api_id, api_hash, file_id, save_path):
+    def __init__(self, session_string, api_id, api_hash, chat_id, message_id, save_path):
         super().__init__()
         self.session_string = session_string
         self.api_id = api_id
         self.api_hash = api_hash
-        self.file_id = file_id
+        self.chat_id = chat_id
+        self.message_id = message_id
         self.save_path = save_path
         self.signals = self.Signals()
 
@@ -29,7 +30,12 @@ class DownloadTask(QRunnable):
                                 api_id=self.api_id, api_hash=self.api_hash,
                                 workdir=WORK_DIR)
                 async with client:
-                    await client.download_media(self.file_id, file_name=self.save_path)
+                    # 1. 获取最新的消息（刷新引用）
+                    msg = await client.get_messages(self.chat_id, self.message_id)
+                    if not msg or not msg.document:
+                        raise Exception("消息中没有文件")
+                    # 2. 下载文件
+                    await client.download_media(msg, file_name=self.save_path)
             loop.run_until_complete(_download())
             self.signals.finished.emit(self.save_path)
         except Exception as e:

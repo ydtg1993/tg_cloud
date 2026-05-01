@@ -361,7 +361,9 @@ class MainWindow(QMainWindow):
     # ===== 下载 =====
     def _start_download_from_info(self, file_info):
         if not file_info: return
-        file_id = file_info[1]
+        # file_info 结构: (id, file_id, message_id, chat_id, original_name, display_name, ...)
+        message_id = file_info[2]
+        chat_id = file_info[3]
         default_name = file_info[4] or file_info[5] or "file"
         save_path, _ = QFileDialog.getSaveFileName(
             self, "保存文件",
@@ -372,7 +374,9 @@ class MainWindow(QMainWindow):
         if not pyro:
             self.show_status_message("请先完成Pyrogram登录", error=True)
             return
-        task = DownloadTask(pyro["session"], pyro["api_id"], pyro["api_hash"], file_id, save_path)
+        # 传入 chat_id 和 message_id 代替 file_id
+        task = DownloadTask(pyro["session"], pyro["api_id"], pyro["api_hash"],
+                            chat_id, message_id, save_path)
         task.signals.finished.connect(lambda p: self.show_status_message(f"下载完成: {p}"))
         task.signals.error.connect(lambda e: self.show_status_message(f"下载失败: {e}", error=True))
         self.show_status_message("下载中...", progress=True)
