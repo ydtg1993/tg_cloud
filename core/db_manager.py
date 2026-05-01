@@ -1,5 +1,9 @@
 import sqlite3
 import os
+from collections import namedtuple
+
+DirectoryItem = namedtuple('DirectoryItem',
+                           ['id', 'name', 'is_dir', 'message_id', 'original_name', 'display_name', 'file_size', 'upload_time', 'mime_type'])
 
 class DBManager:
     def __init__(self, db_path="tgfiles.db"):
@@ -18,7 +22,8 @@ class DBManager:
             "FROM files WHERE directory_id=? ORDER BY display_name, original_name",
             (directory_id,)
         ).fetchall()
-        return dirs + files
+        # 转换为 namedtuple
+        return [DirectoryItem(*row) for row in (dirs + files)]
 
     def create_tables(self):
         self.conn.executescript("""
@@ -168,3 +173,83 @@ class DBManager:
         for did in reversed(dirs_to_delete):
             self.conn.execute("DELETE FROM directories WHERE id=?", (did,))
         self.conn.commit()
+
+        # 在 DBManager 类中添加以下方法
+
+    def search_files_by_name(self, keyword):
+        """根据文件名搜索文件，返回包含完整路径的结果列表"""
+        # 搜索 display_name 或 original_name 包含关键字的文件（不区分大小写）
+        keyword = f"%{keyword}%"
+        files = self.conn.execute(
+            """SELECT f.id, f.file_id, f.message_id, f.chat_id, 
+                      f.original_name, f.display_name, f.directory_id, 
+                      f.file_size, f.upload_time, f.mime_type,
+                      d.name as dir_name
+               FROM files f
+               LEFT JOIN directories d ON f.directory_id = d.id
+               WHERE (f.display_name LIKE ? OR f.original_name LIKE ?)
+               ORDER BY COALESCE(f.display_name, f.original_name) COLLATE NOCASE ASC""",
+            (keyword, keyword)
+        ).fetchall()
+
+        results = []
+        for row in files:
+            file_id = row[0]
+            dir_id = row[6]
+            # 获取完整路径
+            path_parts = self.get_path_to_directory(dir_id)
+            path_str = self._build_path_string(path_parts)
+            results.append({
+                'id': file_id,
+                'name': row[5] or row[4],  # display_name 优先
+                'directory_id': dir_id,
+                'full_path': path_str,
+                'original_name': row[4],
+                'display_name': row[5],
+                'file_size': row[7],
+                'upload_time': row[8],
+                'mime_type': row[9]
+            })
+        return results
+
+    def search_files_by_date_range(self, start_date, end_date):
+        """根据上传时间范围搜索文件"""
+        # start_date 和 end_date 格式为 'YYYY-MM-DD'
+        files = self.conn.execute(
+            """SELECT f.id, f.file_id, f.message_id, f.chat_id, 
+                      f.original_name, f.display_name, f.directory_id, 
+                      f.file_size, f.upload_time, f.mime_type
+               FROM files f
+               WHERE DATE(f.upload_time) >= ? AND DATE(f.upload_time) <= ?
+               ORDER BY f.upload_time DESC""",
+            (start_date, end_date)
+        ).fetchall()
+
+        results = []
+        for row in files:
+            dir_id = row[6]
+            path_parts = self.get_path_to_directory(dir_id)
+            path_str = self._build_path_string(path_parts)
+            results.append({
+                'id': row[0],
+                'name': row[5] or row[4],
+                'directory_id': dir_id,
+                'full_path': path_str,
+                'original_name': row[4],
+                'display_name': row[5],
+                'file_size': row[7],
+                'upload_time': row[8],
+                'mime_type': row[9]
+            })
+        return results
+
+    def _build_path_string(self, path_parts):
+        """将路径元组列表转换为字符串"""
+        # path_parts: [(id, name), ...]
+        parts = []
+        for _, name in path_parts:
+            if name != "根目录":
+                parts.append(name)
+        if not parts:
+            return "/"
+        return "/" + "/".join(parts)

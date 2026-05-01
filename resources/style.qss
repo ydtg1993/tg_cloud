@@ -172,3 +172,22 @@ QScrollBar::handle:horizontal {
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
     width: 0px;
 }
+
+/* 搜索栏输入框 */
+QLineEdit#search_input {
+    background-color: #45494a;
+    border: 1px solid #4e5153;
+    border-radius: 4px;
+    padding: 6px 10px;
+}
+
+/* 搜索按钮 */
+QPushButton#search_btn, QPushButton#date_search_btn {
+    background-color: #4d6e9f;
+    color: white;
+    padding: 6px 12px;
+}
+
+QPushButton#search_btn:hover, QPushButton#date_search_btn:hover {
+    background-color: #5d7eaf;
+}

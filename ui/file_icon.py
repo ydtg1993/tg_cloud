@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
-import json
+from core.drag_service import DragDataService
 
 class FileIconView(QListWidget):
     def __init__(self, parent=None):
@@ -14,36 +14,31 @@ class FileIconView(QListWidget):
         self._highlight_item = None
 
     def startDrag(self, supportedActions):
-        # 收集所有选中的文件项
         selected_items = self.selectedItems()
         file_ids = []
         for item in selected_items:
             data = item.data(Qt.UserRole)
-            if data and data[1] == 0:  # 文件
+            if data and data[1] == 0:
                 file_ids.append(data[0])
         if not file_ids:
             return
 
-        import json
-        mime = QMimeData()
-        mime.setData("application/x-file-id", json.dumps(file_ids).encode())
-
+        mime = DragDataService.encode_file_ids(file_ids)
         drag = QDrag(self)
         drag.setMimeData(mime)
-        # 图标用第一个选中项的图标
         if selected_items:
             drag.setPixmap(selected_items[0].icon().pixmap(48, 48))
         drag.exec(Qt.MoveAction)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat("application/x-file-id"):
+        if event.mimeData().hasFormat(DragDataService.MIME_TYPE):
             event.acceptProposedAction()
             self._update_highlight(event.pos())
         else:
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat("application/x-file-id"):
+        if event.mimeData().hasFormat(DragDataService.MIME_TYPE):
             event.acceptProposedAction()
             self._update_highlight(event.pos())
         else:
@@ -55,7 +50,7 @@ class FileIconView(QListWidget):
 
     def dropEvent(self, event):
         self._clear_highlight()
-        if event.mimeData().hasFormat("application/x-file-id"):
+        if event.mimeData().hasFormat(DragDataService.MIME_TYPE):
             item = self.itemAt(event.pos())
             if not item:
                 return
@@ -63,14 +58,7 @@ class FileIconView(QListWidget):
             if not data or data[1] != 1:
                 return
             target_dir_id = data[0]
-            raw_data = bytes(event.mimeData().data("application/x-file-id"))
-            try:
-                file_ids = json.loads(raw_data.decode())
-                if isinstance(file_ids, int):
-                    file_ids = [file_ids]
-            except:
-                file_ids = [int(raw_data.decode())]
-
+            file_ids = DragDataService.decode_file_ids(event.mimeData())
             if self.move_file_callback:
                 for fid in file_ids:
                     self.move_file_callback(fid, target_dir_id)
@@ -83,7 +71,7 @@ class FileIconView(QListWidget):
         item = self.itemAt(pos)
         if item:
             data = item.data(Qt.UserRole)
-            if data and data[1] == 1:          # 目录
+            if data and data[1] == 1:
                 item.setBackground(QColor(100, 149, 237, 80))
                 self._highlight_item = item
 

@@ -1,15 +1,15 @@
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QFileInfo
-from PySide6.QtWidgets import QApplication, QStyle, QFileIconProvider
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
+from PySide6.QtWidgets import QApplication, QStyle
 from PySide6.QtGui import QColor
+from ui.icon_manager import IconManager
+from core.utils import format_file_size
 
 class FileTableModel(QAbstractTableModel):
     HEADERS = ["名称", "大小", "修改时间", "类型"]
-    # 文件图标提供器（利用系统注册表显示图标）
-    _icon_provider = QFileIconProvider()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._items = []
+        self._items = []          # 存储 DirectoryItem 对象
         self._backgrounds = {}
 
     def rowCount(self, parent=QModelIndex()):
@@ -22,44 +22,31 @@ class FileTableModel(QAbstractTableModel):
         if not index.isValid():
             return None
         row = index.row()
-        item = self._items[index.row()]
+        item = self._items[row]
         if role == Qt.BackgroundRole:
-            return self._backgrounds.get(row)  # 默认返回 None，保持样式表背景
-        is_dir = item[2]
+            return self._backgrounds.get(row)
         if role == Qt.DisplayRole:
             col = index.column()
             if col == 0:  # 名称
-                return item[1] if is_dir else (item[5] or item[4])
+                return item.name if item.is_dir else (item.display_name or item.original_name)
             elif col == 1:  # 大小
-                if is_dir:
+                if item.is_dir:
                     return ""
-                size = item[6]
-                if size is None:
-                    return ""
-                try:
-                    size = float(size)
-                except (ValueError, TypeError):
-                    return str(size)
-                for unit in ['B', 'KB', 'MB', 'GB']:
-                    if size < 1024:
-                        return f"{size:.1f} {unit}"
-                    size /= 1024
-                return ""
+                return format_file_size(item.file_size)
             elif col == 2:  # 修改时间
-                return "" if is_dir else item[7]
+                return "" if item.is_dir else (item.upload_time or "")
             elif col == 3:  # 类型
-                if is_dir:
+                if item.is_dir:
                     return "文件夹"
-                return item[8] if item[8] else ""
+                return item.mime_type or ""
         elif role == Qt.DecorationRole and index.column() == 0:
-            if is_dir:
+            if item.is_dir:
                 return QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
             else:
-                # 根据文件名获取系统关联图标
-                name = item[5] or item[4]  # display_name 优先
-                return self._get_system_icon(name)
+                name = item.display_name or item.original_name
+                return IconManager.get_icon(name)
         elif role == Qt.UserRole:
-            return (item[0], is_dir)
+            return (item.id, item.is_dir)
         return None
 
     def setData(self, index, value, role=Qt.EditRole):
@@ -72,19 +59,6 @@ class FileTableModel(QAbstractTableModel):
             self.dataChanged.emit(index, index, [Qt.BackgroundRole])
             return True
         return super().setData(index, value, role)
-
-    def _get_system_icon(self, filename):
-        """通过文件扩展名获取系统关联图标，带简单缓存"""
-        if not filename:
-            return QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
-        # 构造虚拟路径，仅用于获得图标
-        suffix = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
-        # 为避免重复查询，可使用缓存字典（此处简单实现每次查询，性能影响很小）
-        temp_path = f"temp.{suffix}" if suffix else "temp"
-        icon = self._icon_provider.icon(QFileInfo(temp_path))
-        if icon.isNull():
-            return QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
-        return icon
 
     def headerData(self, section, orientation, role):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
@@ -106,8 +80,7 @@ class FileTableModel(QAbstractTableModel):
         if not index.isValid():
             return default_flags
         item = self._items[index.row()]
-        if item[2] == 0:  # 是文件
+        if item.is_dir == 0:  # 是文件
             default_flags |= Qt.ItemIsDragEnabled
-        # 如果希望目录行也能接受放置（内部拖放），可以始终启用，不影响功能
         default_flags |= Qt.ItemIsDropEnabled
         return default_flags
